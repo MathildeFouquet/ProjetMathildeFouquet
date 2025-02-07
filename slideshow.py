@@ -74,7 +74,6 @@ for i, j in combinations(verticales, 2):
 
 # Création du modèle
 model = gp.Model("SlideShow")
-model.setParam('TimeLimit', 60)
 
 # Variable de décision
 slide_vars = model.addVars(slides, vtype=GRB.BINARY, name="slide")
