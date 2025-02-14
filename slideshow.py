@@ -3,7 +3,7 @@ from gurobipy import GRB
 from itertools import combinations
 import sys
 
-# Lecture du fichier
+# méthode pour lire le fichier
 def lire_fichier(nom_fichier):
     try:
         with open(nom_fichier, 'r') as fichier:
@@ -25,14 +25,13 @@ def lire_fichier(nom_fichier):
         print(f"Erreur: Le fichier {nom_fichier} est introuvable.")
         sys.exit(1)
 
-# Fonction pour calculer le score entre deux slides
-def interest_factor(tags1, tags2):
+# méthode pour calculer le score d'une slide
+def score_slide(tags1, tags2):
     return min(len(tags1 & tags2), len(tags1 - tags2), len(tags2 - tags1))
 
-# Chargement des données depuis le fichier passé en argument
+# Chargement des données
 if len(sys.argv) != 2:
     sys.exit(1)
-
 dataset = sys.argv[1]
 nb_photos, images, verticales, horizontales = lire_fichier(dataset)
 
@@ -58,51 +57,86 @@ for i, j in combinations(verticales, 2):
 # Création du modèle
 model = gp.Model("SlideShow")
 
-# Variables de décision
-# Un slide est utilisé ou non
-slide_vars = model.addVars(slides, vtype=GRB.BINARY, name="slide")
-
-# Variables d'ordre pour les slides sélectionnés
-slide_order = model.addVars(slides, vtype=GRB.CONTINUOUS, name="order")
+# Variables de décision :
+# Variable binaire : 1 si la diapositive s est assigné à la position p, 0 sinon
+slide_pos_vars = model.addVars([(s, p) for s in slides for p in range(len(slides))],
+                              vtype=GRB.BINARY, name="slide_pos")
 
 # Contraintes
 # Une photo est utilisée maximum 1 fois
-photo_constraints = {i: model.addConstr(
-    gp.quicksum(slide_vars[s] for s in slides if i in s) <= 1,
-    name=f"photo_{i}")
-    for i in range(nb_photos)
-}
+for i in range(nb_photos):
+    model.addConstr(
+        gp.quicksum(slide_pos_vars[s, p]
+                   for s in slides if i in s
+                   for p in range(len(slides))) <= 1,
+        name=f"photo_{i}")
 
-# Ordre des slides
-for s1, s2 in combinations(slides, 2):
-    if s1 != s2:
-        model.addConstr(
-            slide_order[s1] + 1 <= slide_order[s2] + len(slides) * (1 - slide_vars[s1] - slide_vars[s2]),
-            name=f"order_{s1}_{s2}"
-        )
+# Chaque position ne peut avoir qu'une seule slide
+for p in range(len(slides)):
+    model.addConstr(
+        gp.quicksum(slide_pos_vars[s, p] for s in slides) <= 1,
+        name=f"pos_{p}")
+
+# Une slide ne peut être utilisée qu'une seule fois
+for s in slides:
+    model.addConstr(
+        gp.quicksum(slide_pos_vars[s, p] for p in range(len(slides))) <= 1,
+        name=f"slide_{s}")
+
+# Contrainte d'ordre
+for p in range(1, len(slides)):
+    model.addConstr(
+        gp.quicksum(slide_pos_vars[s, p] for s in slides) <=
+        gp.quicksum(slide_pos_vars[s, p-1] for s in slides),
+        name=f"order_{p}")
 
 # Objectif
-# Maximiser le score basé sur l'ordre correct des slides sélectionnés
-model.setObjective(
-    gp.quicksum(interest_factor(slide_tags[s1], slide_tags[s2]) * slide_vars[s1] * slide_vars[s2]
-                for s1, s2 in combinations(slides, 2)),
-    GRB.MAXIMIZE
+# Maximiser le score du diaporama
+objective = gp.quicksum(
+    score_slide(slide_tags[s1], slide_tags[s2]) * slide_pos_vars[s1, p] * slide_pos_vars[s2, p+1]
+    for s1 in slides
+    for s2 in slides
+    for p in range(len(slides)-1)
 )
+model.setObjective(objective, GRB.MAXIMIZE)
 
-# Résolution
+# Permet d'afficher le progrès dans la console
+model.Params.OutputFlag = 1
+
+# Prends tous les coeurs disponibles
+model.setParam("Threads", 0)
+
+# Gap optimalité pour accélérer la convergence
+model.setParam("MIPGap", 0.01)
+
+# Utilise plusieurs méthodes de résolution en parallèle
+model.setParam("ConcurrentMIP", 2)
+
+# Privilégie des solutions rapidement
+model.setParam("MIPFocus", 1)
+
 model.optimize()
 
-# Extraction de la solution dans l'ordre des slides sélectionnés
-selected_slides = [s for s in slides if slide_vars[s].X > 0.5]
-slides_solution = sorted(selected_slides, key=lambda s: slide_order[s].X)
+# Extraction de la solution
+slides_solution = []
+for p in range(len(slides)):
+    for s in slides:
+        if slide_pos_vars[s, p].X > 0.5:
+            slides_solution.append(s)
+            break
+    if len(slides_solution) < p + 1:
+        break
 
-# Score optimal
-total_score = model.objVal
+# Calcul du score total
+total_score = sum(
+    score_slide(slide_tags[s1], slide_tags[s2])
+    for s1, s2 in zip(slides_solution, slides_solution[1:])
+)
 
-# Sauvegarde de la solution dans un fichier .sol
+print(f"Score total: {total_score}")
+
+# Ecriture de la solution dans un fichier .sol
 with open("slideshow.sol", "w") as f:
     f.write(f"{len(slides_solution)}\n")
     for slide in slides_solution:
         f.write(" ".join(map(str, slide)) + "\n")
-
-print(f"Solution optimale écrite dans slideshow.sol avec un score de {total_score}")
