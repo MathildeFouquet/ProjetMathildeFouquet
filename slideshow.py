@@ -4,139 +4,154 @@ from itertools import combinations
 import sys
 
 # méthode pour lire le fichier
-def lire_fichier(nom_fichier):
+def lireFichier(nom_fichier):
     try:
         with open(nom_fichier, 'r') as fichier:
-            nb_photos = int(fichier.readline().strip())
+            nbPhotos = int(fichier.readline().strip())
             images = {}
             verticales = []
             horizontales = []
-            for num_image, ligne in enumerate(fichier):
+            for numImage, ligne in enumerate(fichier):
                 elements = ligne.split()
                 format_photo = elements[0]
                 tags = set(elements[2:])
-                images[num_image] = {'format': format_photo, 'tags': tags}
+                images[numImage] = {'format': format_photo, 'tags': tags}
                 if format_photo == 'V':
-                    verticales.append(num_image)
+                    verticales.append(numImage)
                 else:
-                    horizontales.append(num_image)
-        return nb_photos, images, verticales, horizontales
+                    horizontales.append(numImage)
+        return nbPhotos, images, verticales, horizontales
     except FileNotFoundError:
         print(f"Erreur: Le fichier {nom_fichier} est introuvable.")
         sys.exit(1)
 
 # méthode pour calculer le score d'une slide
-def score_slide(tags1, tags2):
+def scoreSlide(tags1, tags2):
     return min(len(tags1 & tags2), len(tags1 - tags2), len(tags2 - tags1))
 
-# Chargement des données
+# chargement des données
 if len(sys.argv) != 2:
     sys.exit(1)
 dataset = sys.argv[1]
-nb_photos, images, verticales, horizontales = lire_fichier(dataset)
+nbPhotos, images, verticales, horizontales = lireFichier(dataset)
 
-# Génération des slides possibles
+# génération des slides possibles
 slides = []
-slide_tags = {}
-slide_photo_count = {}
+slideTags = {}
+slidePhotoCount = {}
 
-# Ajout des slides horizontaux
+# ajout des slides horizontales
 for img in horizontales:
     slide = (img,)
     slides.append(slide)
-    slide_tags[slide] = images[img]['tags']
-    slide_photo_count[slide] = 1
+    slideTags[slide] = images[img]['tags']
+    slidePhotoCount[slide] = 1
 
-# Ajout des slides verticaux (par paires)
+# ajout des slides verticales (toutes les combinaisons possibles)
 for i, j in combinations(verticales, 2):
     slide = (i, j)
     slides.append(slide)
-    slide_tags[slide] = images[i]['tags'] | images[j]['tags']
-    slide_photo_count[slide] = 2
+    slideTags[slide] = images[i]['tags'] | images[j]['tags']
+    slidePhotoCount[slide] = 2
 
-# Création du modèle
+# on calcule au préalable les scores de transitions entre chaque paire de slides
+transitionScore = {(s1, s2): scoreSlide(slideTags[s1], slideTags[s2])
+                    for s1 in slides for s2 in slides if s1 != s2}
+
 model = gp.Model("SlideShow")
 
-# Variables de décision :
-# Variable binaire : 1 si la diapositive s est assigné à la position p, 0 sinon
-slide_pos_vars = model.addVars([(s, p) for s in slides for p in range(len(slides))],
-                              vtype=GRB.BINARY, name="slide_pos")
+# variables de décision :
+# 1 si la slide est utilisée dans le diaporama, 0 sinon
+x = model.addVars(slides, vtype=GRB.BINARY, name="x")
+# 1 si la slide 1 suit la slide 2, 0 sinon
+y = model.addVars(transitionScore.keys(), vtype=GRB.BINARY, name="y")
 
-# Contraintes
-# Une photo est utilisée maximum 1 fois
-for i in range(nb_photos):
-    model.addConstr(
-        gp.quicksum(slide_pos_vars[s, p]
-                   for s in slides if i in s
-                   for p in range(len(slides))) <= 1,
-        name=f"photo_{i}")
-
-# Chaque position ne peut avoir qu'une seule slide
-for p in range(len(slides)):
-    model.addConstr(
-        gp.quicksum(slide_pos_vars[s, p] for s in slides) <= 1,
-        name=f"pos_{p}")
-
-# Une slide ne peut être utilisée qu'une seule fois
+# contraintes :
+# une slide n'a pas plus d'un successeur et un prédécesseur
 for s in slides:
-    model.addConstr(
-        gp.quicksum(slide_pos_vars[s, p] for p in range(len(slides))) <= 1,
-        name=f"slide_{s}")
+    model.addConstr(gp.quicksum(y[s, s2] for s2 in slides if s2 != s) <= x[s],
+                    name=f"successeur_{s}")
+    model.addConstr(gp.quicksum(y[s1, s] for s1 in slides if s1 != s) <= x[s],
+                    name=f"predecesseur_{s}")
 
-# Contrainte d'ordre
-for p in range(1, len(slides)):
-    model.addConstr(
-        gp.quicksum(slide_pos_vars[s, p] for s in slides) <=
-        gp.quicksum(slide_pos_vars[s, p-1] for s in slides),
-        name=f"order_{p}")
 
-# Objectif
-# Maximiser le score du diaporama
-objective = gp.quicksum(
-    score_slide(slide_tags[s1], slide_tags[s2]) * slide_pos_vars[s1, p] * slide_pos_vars[s2, p+1]
-    for s1 in slides
-    for s2 in slides
-    for p in range(len(slides)-1)
-)
-model.setObjective(objective, GRB.MAXIMIZE)
+for photo in range(nbPhotos):
+    slidesWithPhoto = []
+    # pour chaque slide, on vérifie si la photo est présente dans cette slide
+    for s in slides:
+        # si c'est le cas on l'ajoute la slide à la liste
+        if photo in s:
+            slidesWithPhoto.append(s)
 
-# Permet d'afficher le progrès dans la console
-model.Params.OutputFlag = 1
+    # une image est utilisée au plus une fois dans le diaporama
+    if slidesWithPhoto:
+        model.addConstr(gp.quicksum(x[s] for s in slidesWithPhoto) <= 1,
+                        name=f"photo_{s}")
 
-# Prends tous les coeurs disponibles
-model.setParam("Threads", 0)
+# le diaporama doit contenir minimum une slide
+model.addConstr(gp.quicksum(x[s] for s in slides) >= 1, name="nbMinSlide")
 
-# Gap optimalité pour accélérer la convergence
-model.setParam("MIPGap", 0.01)
+# variable de précédence
+varPrec = model.addVars(slides, vtype=GRB.CONTINUOUS, lb=0, ub=len(slides), name="u")
+# on établit les contraintes de précédences
+for s1, s2 in y:
+    if s1 != s2:
+        model.addConstr(varPrec[s1] - varPrec[s2] + len(slides) * y[s1, s2] <= len(slides) - 1,
+                        name=f"precedence_{s1}_{s2}")
 
-# Utilise plusieurs méthodes de résolution en parallèle
-model.setParam("ConcurrentMIP", 2)
 
-# Privilégie des solutions rapidement
-model.setParam("MIPFocus", 1)
+# objectif :
+# maximiser la somme des scores de transition pour les slides qui se succèdent
+model.setObjective(gp.quicksum(transitionScore[s1, s2] * y[s1, s2]
+                               for (s1, s2) in y), GRB.MAXIMIZE)
 
 model.optimize()
 
-# Extraction de la solution
-slides_solution = []
-for p in range(len(slides)):
-    for s in slides:
-        if slide_pos_vars[s, p].X > 0.5:
-            slides_solution.append(s)
-            break
-    if len(slides_solution) < p + 1:
+
+# reconstruction du diaporama à partir de la solution obtenue par le modèle
+# recherche de la première slide du diaporama
+startSlide = None
+for s in slides:
+    if x[s].X == 1 and sum(y[s1, s].X for s1 in slides if s1 != s) == 0:
+        startSlide = s
         break
 
-# Calcul du score total
-total_score = sum(
-    score_slide(slide_tags[s1], slide_tags[s2])
-    for s1, s2 in zip(slides_solution, slides_solution[1:])
+diaporama = []
+
+# si on a une première slide, on construit le diaporama à partir de cette slide
+if startSlide is not None:
+    diaporama.append(startSlide) 
+    currentSlide = startSlide
+
+    # on cherche des slides pour continuer à construire le diaporama
+    while True:
+        slideSuivante = None
+
+        # pour chaque slide, on vérifie si elle suit la current slide
+        for s in slides:
+            # si on a une transition entre current slide et s alors s suit current slide
+            if s != currentSlide and y[currentSlide, s].X == 1:
+                slideSuivante = s
+                break
+
+        # si aucune slide suivante n'est trouvée, c'est que le diaporama est terminé
+        if slideSuivante is None:
+            break
+
+        # tant qu'on a une slide suivante on l'ajoute au diaporama
+        diaporama.append(slideSuivante)
+        currentSlide = slideSuivante
+
+# calcul du score total du diaporama
+scoreTotal = sum(
+    scoreSlide(slideTags[s1], slideTags[s2])
+    for s1, s2 in zip(diaporama, diaporama[1:])
 )
 
-print(f"Score total: {total_score}")
+print(f"Solution optimale écrite dans slideshow.sol avec un score de {scoreTotal}.")
 
-# Ecriture de la solution dans un fichier .sol
+# ecriture de la solution dans un fichier .sol
 with open("slideshow.sol", "w") as f:
-    f.write(f"{len(slides_solution)}\n")
-    for slide in slides_solution:
+    f.write(f"{len(diaporama)}\n")
+    for slide in diaporama:
         f.write(" ".join(map(str, slide)) + "\n")
